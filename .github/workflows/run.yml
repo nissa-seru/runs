@@ -1,0 +1,167 @@
+name: run
+run-name: ${{ inputs.id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: The run's id, chosen by whoever starts it
+        required: true
+        type: string
+      checkouts:
+        description: One line per checkout, "SHA OWNER/REPO PATH"; the first is where the setup and the command run
+        required: true
+        type: string
+      os:
+        description: The runner's operating system
+        required: true
+        type: choice
+        options: [linux, windows, macos]
+      node:
+        description: The Node.js version to set up, or none
+        required: true
+        type: string
+      bun:
+        description: The Bun version to set up, or none
+        required: true
+        type: string
+      setup:
+        description: A bash command run before the command, such as an install; empty for none
+        required: false
+        type: string
+        default: ""
+      command:
+        description: The bash command to run
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  run:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ${{ inputs.os == 'windows' && 'windows-2025' || inputs.os == 'macos' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Record the runner
+        run: |
+          set +e
+          out="$RUNNER_TEMP/on-gh"
+          mkdir -p "$out/evidence"
+          echo "on-gh-run/1" > "$out/format"
+          case "$RUNNER_OS" in
+            Linux)
+              cpus=$(nproc)
+              model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+              memory=$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo) ;;
+            macOS)
+              cpus=$(sysctl -n hw.ncpu)
+              model=$(sysctl -n machdep.cpu.brand_string)
+              memory=$(sysctl -n hw.memsize) ;;
+            Windows)
+              cpus=${NUMBER_OF_PROCESSORS:-}
+              model=$(powershell -NoProfile -Command '(Get-CimInstance Win32_Processor | Select-Object -First 1).Name')
+              memory=$(powershell -NoProfile -Command '(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory') ;;
+          esac
+          for pair in "os=$RUNNER_OS" "arch=$RUNNER_ARCH" "image=${ImageOS:-}" "imageVersion=${ImageVersion:-}" \
+                      "cpuModel=${model:-}" "cpus=${cpus:-}" "memoryBytes=${memory:-}"; do
+            printf '%s\n' "$pair" | tr -d '\r'
+          done > "$out/runner"
+
+      - name: Check out
+        env:
+          CHECKOUTS: ${{ inputs.checkouts }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/on-gh"
+          root="$GITHUB_WORKSPACE/w"
+          while read -r sha repository path rest; do
+            [ -n "${sha:-}" ] || continue
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ && "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ \
+                    && "$path" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ && -z "${rest:-}" ]] \
+               || [[ "/$path/" == */../* || "/$path/" == */./* ]]; then
+              echo "not a checkout line: $sha $repository $path $rest" >&2
+              exit 1
+            fi
+            git init -q "$root/$path"
+            git -C "$root/$path" fetch --depth=1 --no-tags -q "$GITHUB_SERVER_URL/$repository" "$sha"
+            git -C "$root/$path" -c advice.detachedHead=false checkout -q FETCH_HEAD
+            printf '%s %s %s\n' "$sha" "$repository" "$path" >> "$out/checkouts"
+          done <<< "$CHECKOUTS"
+          [ -s "$out/checkouts" ]
+
+      - name: Set up Node.js
+        if: ${{ inputs.node != 'none' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ inputs.node }}
+
+      - name: Set up Bun
+        if: ${{ inputs.bun != 'none' }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ inputs.bun }}
+
+      - name: Run
+        env:
+          ON_GH_RUN_ID: ${{ inputs.id }}
+          SETUP: ${{ inputs.setup }}
+          COMMAND: ${{ inputs.command }}
+        run: |
+          set +e
+          out="$RUNNER_TEMP/on-gh"
+          cd "$GITHUB_WORKSPACE/w/$(head -n 1 "$out/checkouts" | cut -d ' ' -f 3)" || exit 1
+          export TMPDIR="$RUNNER_TEMP/on-gh-tmp" ON_GH_EVIDENCE_DIR="$out/evidence"
+          mkdir -p "$TMPDIR"
+          TIMEFORMAT='%R %U %S'
+          if [ -n "$SETUP" ]; then
+            { time "$BASH" -c "$SETUP" > "$out/setup.log" 2>&1; } 2> "$out/setup.time"
+            echo "$?" > "$out/setup.exit"
+            head -c "$(wc -c < "$out/setup.log")" "$out/setup.log"
+          fi
+          for tool in node npm bun uv; do
+            if command -v "$tool" > /dev/null; then
+              printf '%s=%s\n' "$tool" "$("$tool" --version 2>&1 | head -n 1 | tr -d '\r')"
+            fi
+          done > "$out/versions"
+          [ ! -f "$out/setup.exit" ] || [ "$(cat "$out/setup.exit")" = 0 ] || exit 0
+          if [ -f package-lock.json ] && command -v npm > /dev/null; then
+            npm ls --depth=0 > "$out/packages" 2>&1
+          elif { [ -f bun.lock ] || [ -f bun.lockb ]; } && command -v bun > /dev/null; then
+            bun pm ls > "$out/packages" 2>&1
+          fi
+          { time "$BASH" -c "$COMMAND" > "$out/output.log" 2>&1; } 2> "$out/command.time"
+          echo "$?" > "$out/command.exit"
+          head -c "$(wc -c < "$out/output.log")" "$out/output.log"
+          exit 0
+
+      - name: Keep the artifact small
+        if: ${{ always() }}
+        run: |
+          set +e
+          out="$RUNNER_TEMP/on-gh"
+          [ -d "$out" ] || exit 0
+          kb=$(du -sk "$out/evidence" 2> /dev/null | cut -f 1)
+          if [ "${kb:-0}" -gt 51200 ]; then
+            rm -rf "$out/evidence"
+            echo "$kb" > "$out/evidence-refused-kb"
+          fi
+          for log in setup.log output.log; do
+            if [ -f "$out/$log" ] && [ "$(wc -c < "$out/$log")" -gt 20000000 ]; then
+              wc -c < "$out/$log" | tr -d ' ' > "$out/$log.bytes"
+              tail -c 20000000 "$out/$log" > "$out/$log.tail" && mv "$out/$log.tail" "$out/$log"
+            fi
+          done
+
+      - name: Upload the result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: on-gh
+          path: ${{ runner.temp }}/on-gh
+          retention-days: 1
+          if-no-files-found: ignore
+          include-hidden-files: true
