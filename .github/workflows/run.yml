@@ -9,9 +9,14 @@ on:
         required: true
         type: string
       checkouts:
-        description: One line per checkout, "SHA OWNER/REPO PATH"; the first is where the setup and the command run
+        description: One line per checkout, "SHA OWNER/REPO PATH"; the setup and the command run in the first checkout
         required: true
         type: string
+      directory:
+        description: The directory in the first checkout where the setup and the command run; empty for its top
+        required: false
+        type: string
+        default: ""
       os:
         description: The runner's operating system
         required: true
@@ -108,17 +113,21 @@ jobs:
       - name: Run
         env:
           ON_GH_RUN_ID: ${{ inputs.id }}
+          DIRECTORY: ${{ inputs.directory }}
           SETUP: ${{ inputs.setup }}
           COMMAND: ${{ inputs.command }}
         run: |
           set +e
+          directory=$DIRECTORY setup=$SETUP command=$COMMAND
+          unset DIRECTORY SETUP COMMAND
           out="$RUNNER_TEMP/on-gh"
-          cd "$GITHUB_WORKSPACE/w/$(head -n 1 "$out/checkouts" | cut -d ' ' -f 3)" || exit 1
+          top="$GITHUB_WORKSPACE/w/$(head -n 1 "$out/checkouts" | cut -d ' ' -f 3)"
+          cd "$top/$directory" || exit 1
           export TMPDIR="$RUNNER_TEMP/on-gh-tmp" ON_GH_EVIDENCE_DIR="$out/evidence"
           mkdir -p "$TMPDIR"
           TIMEFORMAT='%R %U %S'
-          if [ -n "$SETUP" ]; then
-            { time "$BASH" -c "$SETUP" > "$out/setup.log" 2>&1; } 2> "$out/setup.time"
+          if [ -n "$setup" ]; then
+            { time "$BASH" -c "$setup" > "$out/setup.log" 2>&1; } 2> "$out/setup.time"
             echo "$?" > "$out/setup.exit"
             head -c "$(wc -c < "$out/setup.log")" "$out/setup.log"
           fi
@@ -128,12 +137,17 @@ jobs:
             fi
           done > "$out/versions"
           [ ! -f "$out/setup.exit" ] || [ "$(cat "$out/setup.exit")" = 0 ] || exit 0
-          if [ -f package-lock.json ] && command -v npm > /dev/null; then
-            npm ls --depth=0 > "$out/packages" 2>&1
-          elif { [ -f bun.lock ] || [ -f bun.lockb ]; } && command -v bun > /dev/null; then
-            bun pm ls > "$out/packages" 2>&1
-          fi
-          { time "$BASH" -c "$COMMAND" > "$out/output.log" 2>&1; } 2> "$out/command.time"
+          for at in . "$top"; do
+            if [ -f "$at/package-lock.json" ]; then
+              ! command -v npm > /dev/null || (cd "$at" && npm ls --depth=0) > "$out/packages" 2>&1
+            elif [ -f "$at/bun.lock" ] || [ -f "$at/bun.lockb" ]; then
+              ! command -v bun > /dev/null || (cd "$at" && bun pm ls) > "$out/packages" 2>&1
+            else
+              continue
+            fi
+            break
+          done
+          { time "$BASH" -c "$command" > "$out/output.log" 2>&1; } 2> "$out/command.time"
           echo "$?" > "$out/command.exit"
           head -c "$(wc -c < "$out/output.log")" "$out/output.log"
           exit 0
