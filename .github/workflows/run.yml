@@ -205,7 +205,7 @@ jobs:
           set +e
           out="$RUNNER_TEMP/on-gh"
           [ -d "$out" ] || exit 0
-          # upload-artifact's glob follows links and uploads the bytes of every path it reaches, so measure that: -L follows links, -l counts a file reached again, and the apparent size counts bytes, not blocks (BSD du's -A is GNU du's --apparent-size).
+          # upload-artifact's glob follows links and uploads the bytes of every path it reaches, so measure that: -L follows links, -l counts a file reached again, and the apparent size counts bytes, not blocks (BSD du's -A is GNU du's --apparent-size, which counts a directory as nothing; BSD du counts its own size, tens of bytes for each name).
           apparent=--apparent-size
           [ "$RUNNER_OS" != macOS ] || apparent=-A
           kb=$(du -sklL $apparent "$out/evidence" 2> /dev/null | cut -f 1)
