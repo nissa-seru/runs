@@ -205,10 +205,17 @@ jobs:
           set +e
           out="$RUNNER_TEMP/on-gh"
           [ -d "$out" ] || exit 0
-          kb=$(du -sk "$out/evidence" 2> /dev/null | cut -f 1)
+          # upload-artifact's glob follows links and uploads the bytes of every path it reaches, so measure that: -L follows links, -l counts a file reached again, and the apparent size counts bytes, not blocks (BSD du's -A is GNU du's --apparent-size).
+          apparent=--apparent-size
+          [ "$RUNNER_OS" != macOS ] || apparent=-A
+          kb=$(du -sklL $apparent "$out/evidence" 2> /dev/null | cut -f 1)
+          entries=$(find -L "$out/evidence" -mindepth 1 2> /dev/null | wc -l | tr -d ' ')
           if [ "${kb:-0}" -gt 51200 ]; then
             rm -rf "$out/evidence"
             echo "$kb" > "$out/evidence-refused-kb"
+          elif [ "${entries:-0}" -gt 9900 ]; then
+            rm -rf "$out/evidence"
+            echo "$entries" > "$out/evidence-refused-entries"
           fi
           for log in setup.log output.log; do
             if [ -f "$out/$log" ] && [ "$(wc -c < "$out/$log")" -gt 20000000 ]; then
