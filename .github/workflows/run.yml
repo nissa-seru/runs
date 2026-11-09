@@ -18,10 +18,10 @@ on:
         type: string
         default: ""
       os:
-        description: The runner's operating system
+        description: The runner's image, or an operating system for the image it had before images could be named
         required: true
         type: choice
-        options: [linux, windows, macos]
+        options: [linux, windows, macos, ubuntu-26.04, ubuntu-24.04, macos-26, macos-15, windows-2025]
       node:
         description: The Node.js version to set up, or none
         required: true
@@ -50,7 +50,7 @@ permissions: {}
 jobs:
   run:
     if: ${{ github.event.repository.private == false }}
-    runs-on: ${{ inputs.os == 'windows' && 'windows-2025' || inputs.os == 'macos' && 'macos-15' || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.os == 'ubuntu-26.04' && 'ubuntu-26.04' || inputs.os == 'ubuntu-24.04' && 'ubuntu-24.04' || inputs.os == 'macos-26' && 'macos-26' || inputs.os == 'macos-15' && 'macos-15' || inputs.os == 'windows-2025' && 'windows-2025' || inputs.os == 'linux' && 'ubuntu-24.04' || inputs.os == 'macos' && 'macos-15' || inputs.os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
     timeout-minutes: 350
     defaults:
       run:
